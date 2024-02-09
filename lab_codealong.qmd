@@ -1,0 +1,249 @@
+---
+title: "ESM 244 Lab 5"
+author: "Casey O'Hara"
+format: 
+  html:
+    code-fold: true
+    embed-resources: true
+    toc: true
+editor: visual
+execute:
+  message: false
+  warning: false
+---
+
+# Summary
+
+We want to create a model we can use in the field to quickly and easily estimate a penguin's mass, based on the subset of data in the `palmerpenguins` package.
+
+Objectives:
+
+* Set up several competing models
+    * data cleaning and prep
+* Compare their fit using information criteria
+* Compare models using cross-validation
+    * practice writing function
+    * iterating with for loops and purrr
+    
+# Set up some models
+
+## clean our data
+
+```{r}
+library(tidyverse)
+library(palmerpenguins)
+library(AICcmodavg)
+# library(equatiomatic) ### optional remotes::install_github('datalorax/equatiomatic')
+```
+
+```{r}
+penguins_clean <- penguins %>%
+  drop_na() %>%
+  rename(mass = body_mass_g,
+         bill_l = bill_length_mm,
+         bill_d = bill_depth_mm,
+         flip_l = flipper_length_mm)
+```
+
+## Create a linear regression model
+
+```{r}
+mdl1 <- lm(formula = mass ~ bill_l + bill_d + flip_l + species + sex + island,
+           data = penguins_clean)
+```
+
+```{r}
+f1 <- mass ~ bill_l + bill_d + flip_l + species + sex + island
+mdl1 <- lm(formula = f1, data = penguins_clean)
+
+f2 <- mass ~ bill_l + bill_d + flip_l + species + sex
+mdl2 <- lm(f2, data = penguins_clean)
+
+f3 <- mass ~ bill_d + flip_l + species + sex
+mdl3 <- lm(f3, data = penguins_clean)
+```
+
+## Compare models using AIC and BIC
+
+```{r}
+AIC(mdl1, mdl2, mdl3)
+
+BIC(mdl1, mdl2, mdl3)
+
+AICcmodavg::aictab(list(mdl1, mdl2, mdl3))
+bictab(list(mdl1, mdl2, mdl3))
+```
+
+## Compare using cross validation
+
+We have a dataset of 333 penguin observations. 
+We have 3 models we'd like to compare.
+We want to use cross validation - 10-fold cross validation, focus on model 1
+
+### Pseudocode
+
+Finding the RMSE of each of the models
+building a function to create a list of models and iterate over each of the models
+split the data into 10 pieces - one for test, and do some iterations
+at the end compare the success rate of each of the models
+reserve 1/10th as the test, the other 9/10ths is training
+randomly choosing the data that we reserve
+for each of the 10 folds, make a model, make RMSE of each based on the 1/10th reserve, and then do that ten times.
+
+```{r}
+folds <- 10
+fold_vec <- rep(1:folds, length.out = nrow(penguins_clean))
+
+set.seed(42)
+
+penguins_fold <- penguins_clean %>%
+  mutate(group = sample(fold_vec, size = n(), replace = FALSE))
+table(penguins_fold$group)
+
+### Reserve the first fold for testing, and the rest for training
+test_df <- penguins_fold %>%
+  filter(group == 1)
+
+train_df <- penguins_fold %>%
+  filter(group != 1)
+
+```
+
+### Create an RMSE function
+
+Root-mean-square error for comparing our predicted mass against the observed mass.
+
+```{r}
+calc_rmse <- function(x, y) {
+  ### x is a predicted value, y is observed
+  rmse <- (x - y)^2 %>% mean() %>% sqrt()
+  return(rmse)
+}
+```
+
+### Train the model on training set
+
+```{r}
+training_lm1 <- lm(f1, data = train_df)
+training_lm2 <- lm(f2, data = train_df)
+training_lm3 <- lm(f3, data = train_df)
+```
+
+### Compare models using RMSE based on first fold
+
+```{r}
+predict_test <- test_df %>%
+  mutate(model1 = predict(training_lm1, test_df),
+         model2 = predict(training_lm2, .),
+         model3 = predict(training_lm3, .))
+
+rmse_predict_test <- predict_test %>%
+  summarize(rmse_mdl1 = calc_rmse(model1, mass),
+            rmse_mdl2 = calc_rmse(model2, mass),
+            rmse_mdl3 = calc_rmse(model3, mass))
+```
+
+### 10-fold cross validation using a `for` loop
+
+for loop cycles over each element in a sequence (vector or list) and performs some set of operations using that element
+```{r}
+# month.name
+# for(m in month.name) {
+#   print(paste('Month: ', m))
+# }
+```
+
+```{r}
+### initialize an empty vector
+rmse_vec <- vector(length = folds)
+
+for(i in 1:folds) {
+  ### split into training and testing
+  kfold_test_df <- penguins_fold %>%
+    filter(group == i)
+  kfold_train_df <- penguins_fold %>%
+    filter(group != i)
+  
+  ### train model
+  kfold_lm1 <- lm(f1, data = kfold_train_df)
+  
+  ### test against the test set
+  kfold_pred_df <- kfold_test_df %>%
+    mutate(mdl = predict(kfold_lm1, .))
+  kfold_rmse <- kfold_pred_df %>%
+    summarize(rmse_mdl = calc_rmse(mdl, mass))
+  
+  ### save output
+  rmse_vec[i] <- kfold_rmse$rmse_mdl
+}
+
+mean(rmse_vec)
+```
+
+```{r}
+kfold_cv <- function(i, df, formula) {
+  ### split into training and testing
+  kfold_test_df <- df %>%
+    filter(group == i)
+  kfold_train_df <- df %>%
+    filter(group != i)
+  
+  ### train model
+  kfold_lm <- lm(formula, data = kfold_train_df)
+  
+  ### test against the test set
+  kfold_pred_df <- kfold_test_df %>%
+    mutate(mdl = predict(kfold_lm, .))
+  kfold_rmse <- kfold_pred_df %>%
+    summarize(rmse_mdl = calc_rmse(mdl, mass))
+  
+  ### return output
+  return(kfold_rmse$rmse_mdl)
+}
+```
+
+```{r}
+# kfold_cv(i = 1, df = penguins_fold, formula = f1)
+
+rmse_loop_vec <- vector(length = folds)
+for(i in 1:folds) {
+  rmse_loop_vec[i] <- kfold_cv(i = i, df = penguins_fold, formula = f1)
+}
+mean(rmse_loop_vec)
+```
+
+### cross validation using `purrr::map()`
+
+Map a function to a sequence of inputs (vector or list)
+
+```{r}
+map(month.name, nchar)
+purrr::map_int(month.name, nchar)
+```
+
+```{r}
+rmse_map_list <- purrr::map(.x = 1:10,
+                            .f = kfold_cv,
+                            df = penguins_fold,
+                            formula = f1)
+rmse_map_list %>% unlist() %>% mean()
+```
+
+```{r}
+rmse_df <- data.frame(j = 1:folds) %>%
+  mutate(rmse_mdl1 = map_dbl(.x = j, .f = kfold_cv, df = penguins_fold, formula = f1),
+         rmse_mdl2 = map_dbl(.x = j, .f = kfold_cv, df = penguins_fold, formula = f2),
+         rmse_mdl3 = map_dbl(.x = j, .f = kfold_cv, df = penguins_fold, formula = f3))
+
+rmse_means <- rmse_df %>%
+  summarize(across(starts_with('rmse'), mean))
+```
+
+```{r}
+final_mdl <- lm(f2, data = penguins_clean)
+summary(final_mdl)
+```
+
+
+
+
