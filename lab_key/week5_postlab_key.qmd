@@ -1,0 +1,187 @@
+---
+title: "Lab 5 post-practice key"
+author: "Casey O'Hara"
+format: 
+  html:
+    code-fold: true
+    embed-resources: true
+editor: visual
+execute:
+  message: false
+  warning: false
+---
+
+# Overview
+
+Each file in `data/county_data` represents a county in California, with information on schools in that county such as type of school, mean standardized test scores, information on demographics, etc.  For this script, we will:
+
+1. Read in a file, and summarize to mean income, mean reading score, and mean math score across each category of school (kindergarten through 6th or 8th, labeled as `KK-06` and `KK-08`).
+2. Save the summarized file in a new folder called `data/county_data_summary` and append a flag of `_sum` at the end of each filename.
+3. Iterate over steps 1 and 2 using a `for` loop and `purrr::map()`.
+
+# Methods
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+
+Collect filenames from the folder, using `list.files()`.
+
+```{r}
+county_files <- list.files(here('data/county_data'), 
+                           pattern = '.csv',    ### in case there are other files we don't want
+                           full.names = TRUE)   ### return the full file path for reading/writing
+head(county_files)
+```
+
+## `for` loop version, no function
+
+Often in `for` loops, people will use a single letter as the value that is being iterated over.  Here we'll use `f` to designate a single file pulled out of `county_files`.  For a sequence from 1:n, it is common to use `i` as the index; if you have nested for loops, often the next index would be a `j`, `k`, etc.
+
+Note the extension, in which there are typos in the county name for Santa Barbara. This code fixes those typos.
+
+In this version, we will just average across all schools regardless of student population.  In the next version, we'll student population into account in a weighted mean (probably a better way to go in this case).
+
+### checking for existing files and folders
+
+You can create the `county_data_summary` file manually, or let R do it for you.  Here, R looks for a directory with the proper name; if it doesn't find it, it creates it.
+
+```{r}
+sum_folder <- here('data/county_data_summary') ### set path to the output folder
+
+if(!file.exists(sum_folder)) {  ### test whether the file or folder exists
+  dir.create(sum_folder)        ### if not detected, create it!
+}
+```
+
+### Run the for loop
+
+```{r}
+for(f in county_files) {   
+  ### f <- county_files[32]  ### highlight and run just this to set an index for testing
+  
+  county_data <- read_csv(f, show_col_types = FALSE)
+    ### show_col_types = FALSE quiets the message
+  
+  county_sum <- county_data %>%
+    mutate(county = tolower(county), ### coerce all to lower case
+           county = str_replace(county, '_', ' '), ### replace underscores with spaces
+           county = str_replace(county, 'barabara', 'barbara')) %>% ### fix typo
+    group_by(grades, county) %>%   ### group by county to keep county column in summarize
+    summarize(inc_mean = mean(income, na.rm = TRUE),
+              read_mean = mean(read, na.rm = TRUE),
+              math_mean = mean(math, na.rm = TRUE),
+              .groups = 'drop')
+                ### .groups = 'drop' ungroups at the end of summarize
+  
+  ### Create a new filename using str_replace.  Just grab the basename for now.
+  base_file_out <- basename(f) %>%
+    str_replace('.csv', '_sum.csv')
+  ### attach base filename to the output folder name (created in chunk above)
+  full_file_out <- file.path(sum_folder, base_file_out)
+    
+  write_csv(county_sum, full_file_out)
+}
+```
+
+## `for` loop with a function
+
+Here let's write a function to summarize our info for each county.  Here we'll add in the complexity of a population-weighted mean so larger schools have a bigger influence on the mean.  Let's create a separate function to calc the weighted mean, as
+
+$$wtd.mean = \frac{\sum(\text{variable $\times$ student population})}{\sum(\text{student population})}$$
+
+Finally, let's create a function to turn an input filename to an output filename.
+
+### define functions
+
+```{r}
+wtd_mean <- function(varname, pop) {
+  x <- sum(varname * pop) / sum(pop)
+  return(x)
+}
+  
+summarize_county <- function(county_data) {
+  names_cleaned <- county_data %>%
+    mutate(county = tolower(county), ### coerce all to lower case
+           county = str_replace(county, '_', ' '), ### replace underscores with spaces
+           county = str_replace(county, 'barabara', 'barbara')) ### fix typo
+  
+  county_sum <- names_cleaned %>%
+    group_by(grades, county) %>%
+    summarize(inc_mean = sum(income * students) / sum(students), ### calc manually
+              read_mean = wtd_mean(read, students), ### calc with function
+              math_mean = wtd_mean(math, students),
+              students = sum(students), ### let's include a column for total students too
+              .groups = 'drop') %>%
+    ### mutate across all numeric columns to round them
+    mutate(across(where(is.numeric), ~round(.x, 1)))
+    
+  return(county_sum)
+}
+
+define_file_out <- function(in_f, out_folder, tag = '_sum') {
+  ### in_f = input file, out_folder = destination folder, tag is the text to 
+  ### append to the output file name.
+  
+  base_file_out <- basename(in_f) %>%
+    ### use the `tag` variable to append it to the output file name
+    str_replace('.csv', paste0(tag, '.csv'))
+
+  ### attach base filename to the output folder name (created in chunk above)
+  full_file_out <- file.path(out_folder, base_file_out)
+  
+  return(full_file_out)
+}
+```
+
+### Process for loop
+
+```{r}
+for(f in county_files) {
+  county_data <- read_csv(f, show_col_types = FALSE)
+  county_sum <- summarize_county(county_data)
+   
+  out_f <- define_file_out(in_f = f, out_folder = sum_folder)
+    ### note, default for `tag` is '_sum', so don't need to override that
+    ### note sum_folder was created above.
+    
+  write_csv(county_sum, out_f)  
+}
+```
+
+## Now using purrr::map()
+
+For purrr::map(), we need to tell it a single function so let's create one that completely processes each file:  reads, summarizes, and writes out.  We can basically copy the code from our for loop and wrap it in a function call.
+
+### define function
+
+```{r}
+process_file <- function(f) {
+  county_data <- read_csv(f, show_col_types = FALSE)
+  county_sum <- summarize_county(county_data)
+   
+  ### here let's use a different file tag to distinguish the loop files from
+  ### the purrr::map files
+  out_f <- define_file_out(in_f = f, out_folder = sum_folder, tag = '_sum_map')
+
+  write_csv(county_sum, out_f)
+  
+  ### after writing the file, the user might want the final dataframe - return it!
+  return(county_sum)
+}
+```
+
+### run purrr::map()
+
+Running purrr::map() results in a list by default.  Here it is a list, with one element for each county file, and in each element is a dataframe returned from `process_file()`.  We can combine a list of dataframes into one big dataframe using `bind_rows()`.  `DT::datatable()` gives a nice interactive way of viewing the combined dataframe.
+
+```{r}
+county_sums_list <- purrr::map(.x = county_files, .f = process_file)
+
+county_sums_df <- bind_rows(county_sums_list)
+
+DT::datatable(county_sums_df)
+```
+
